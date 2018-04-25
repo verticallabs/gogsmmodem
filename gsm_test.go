@@ -12,6 +12,8 @@ import (
 )
 
 var initReplay = []string{
+	"->\x1a",
+	"<-\r\nOK\r\n",
 	"->ATZ\r\n",
 	"<-\r\nOK\r\n",
 	"->ATE0\r\n",

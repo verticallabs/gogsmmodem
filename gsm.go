@@ -315,7 +315,6 @@ func (self *Modem) send(cmd string, args ...interface{}) (Packet, error) {
 
 func (self *Modem) init() error {
 	self.tx <- "\x1a" 
-	_ = <-self.rx
 
 	// clear settings
 	if _, err := self.send("Z"); err != nil {

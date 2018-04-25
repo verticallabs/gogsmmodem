@@ -3,13 +3,17 @@ package gogsmmodem
 import (
 	"bufio"
 	"errors"
+	"fmt"
 	"io"
 	"log"
+	"reflect"
 	"regexp"
 	"strings"
 
 	"github.com/tarm/serial"
 )
+
+const BODY_PROMPT = "> "
 
 type Modem struct {
 	OOB   chan Packet
@@ -126,7 +130,17 @@ func lineChannel(r io.Reader) chan string {
 	go func() {
 		buffer := bufio.NewReader(r)
 		for {
-			line, _ := buffer.ReadString(10)
+			all := []byte{}
+			line := ""
+			for {
+				b, _ := buffer.ReadByte()
+				all = append(all, b)
+				line = string(all)
+				if b == 10 || line == BODY_PROMPT {
+					break
+				}
+			}
+
 			line = strings.TrimRight(line, "\r\n")
 			if line == "" {
 				continue
@@ -225,6 +239,7 @@ func (self *Modem) listen() {
 	for {
 		select {
 		case line := <-in:
+			fmt.Println(line)
 			if line == echo {
 				continue // ignore echo of command
 			} else if last != "" && startsWith(line, last) {
@@ -243,8 +258,9 @@ func (self *Modem) listen() {
 			} else if header != "" {
 				// the body following a header
 				body += line
-			} else if line == "> " {
+			} else if line == BODY_PROMPT {
 				// raw mode for body
+				self.rx <- BodyPrompt{}
 			} else {
 				// OOB packet
 				p := parsePacket("OK", line, "")
@@ -274,12 +290,18 @@ func formatCommand(cmd string, args ...interface{}) string {
 
 func (self *Modem) sendBody(cmd string, body string, args ...interface{}) (Packet, error) {
 	self.tx <- formatCommand(cmd, args...)
-	self.tx <- body + "\x1a"
-	response := <-self.rx
-	if _, e := response.(ERROR); e {
-		return response, errors.New("Response was ERROR")
+	commandResponse := <-self.rx
+	_, isBodyPrompt := commandResponse.(BodyPrompt)
+	if !isBodyPrompt {
+		return commandResponse, errors.New(fmt.Sprintf("Expected body prompt, got %v", reflect.TypeOf(commandResponse)))
 	}
-	return response, nil
+
+	self.tx <- body + "\x1a"
+	bodyResponse := <-self.rx
+	if _, e := bodyResponse.(ERROR); e {
+		return bodyResponse, errors.New("Response was ERROR")
+	}
+	return bodyResponse, nil
 }
 
 func (self *Modem) send(cmd string, args ...interface{}) (Packet, error) {
@@ -292,6 +314,9 @@ func (self *Modem) send(cmd string, args ...interface{}) (Packet, error) {
 }
 
 func (self *Modem) init() error {
+	self.tx <- "\x1a" 
+	_ = <-self.rx
+
 	// clear settings
 	if _, err := self.send("Z"); err != nil {
 		return err

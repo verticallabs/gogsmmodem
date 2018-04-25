@@ -53,6 +53,9 @@ type MessageList []Message
 // Simple OK response
 type OK struct{}
 
+// Body prompt for sending
+type BodyPrompt struct {}
+
 // Simple ERROR response
 type ERROR struct{}
 

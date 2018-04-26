@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/tarm/serial"
 )
@@ -314,7 +315,11 @@ func (self *Modem) send(cmd string, args ...interface{}) (Packet, error) {
 }
 
 func (self *Modem) init() error {
-	self.tx <- "\x1a" 
+	self.tx <- "\x1b" 
+	select {
+	case _ = <-self.rx:
+	case <-time.After(1 * time.Second):
+	}
 
 	// clear settings
 	if _, err := self.send("Z"); err != nil {

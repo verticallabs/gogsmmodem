@@ -15,6 +15,8 @@ import (
 )
 
 const BODY_PROMPT = "> "
+const END_BODY = "\x1a"
+const ESC = "\x1b"
 
 type Modem struct {
 	OOB          chan Packet
@@ -325,7 +327,7 @@ func (self *Modem) sendBody(cmd string, body string, args ...interface{}) (Packe
 		return commandResponse, errors.New(fmt.Sprintf("Expected body prompt, got %v", reflect.TypeOf(commandResponse)))
 	}
 
-	return self.send(body + "\x1a")
+	return self.send(body + END_BODY)
 }
 
 func (self *Modem) send(cmd string) (Packet, error) {
@@ -363,7 +365,7 @@ func (self *Modem) init() error {
 		}
 		// send an escape character in case of hanging body
 		log.Println("No answer to ATZ, sending escape")
-		self.send("\x1b")
+		self.send(ESC)
 	}
 
 	// turn off echo

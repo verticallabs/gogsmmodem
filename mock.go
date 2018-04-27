@@ -2,62 +2,123 @@ package gogsmmodem
 
 import (
 	"fmt"
+	"io"
 	"strings"
+	"time"
 )
 
 type MockSerialPort struct {
-	replay  []string
-	receive chan string
+	replay        []string
+	enqueuedReads chan string
+	position      int
 }
 
 func NewMockSerialPort(replay []string) *MockSerialPort {
 	self := &MockSerialPort{
-		replay:  replay,
-		receive: make(chan string, 16),
+		replay:        replay,
+		enqueuedReads: make(chan string, 16),
+		position:      0,
 	}
-	self.enqueueReads()
+	self.EnqueueReads()
 	return self
 }
 
-func (self *MockSerialPort) Read(b []byte) (int, error) {
-	line := <-self.receive
-	data := []byte(line)
-	copy(b, data)
-	return len(data), nil
+func (self *MockSerialPort) Done() bool {
+	return self.position >= len(self.replay)
 }
 
-func (self *MockSerialPort) enqueueReads() {
+func isRead(str string) bool {
+	return strings.Index(str, "<-") == 0
+}
+
+func isWrite(str string) bool {
+	return strings.Index(str, "->") == 0
+}
+
+func (self *MockSerialPort) Print() {
+	for i, s := range self.replay {
+		if i == self.position {
+			fmt.Printf("* ")
+		} else {
+			fmt.Printf("  ")
+		}
+		fmt.Printf("%v\n", s)
+	}
+}
+
+func (self *MockSerialPort) EnqueueReads() {
 	// enqueue response(s) from replay
+	readPosition := self.position
+	//fmt.Printf("enqueing check %v\n", self.replay[readPosition])
 	for {
-		if len(self.replay) == 0 || strings.Index(self.replay[0], "<-") != 0 {
+		if readPosition >= len(self.replay) || isWrite(self.replay[readPosition]) {
+			//fmt.Printf("skipping %v\n", readPosition)
 			break
 		}
-		i := self.replay[0][2:]
-		self.receive <- i
-		self.replay = self.replay[1:]
+		s := self.replay[readPosition]
+		//fmt.Printf("enqueuing %v\n", s)
+		self.enqueuedReads <- s
+		readPosition++
 	}
+}
+
+func (self *MockSerialPort) Read(b []byte) (int, error) {
+	var result string
+	select {
+	case <-time.After(5 * time.Second):
+		fmt.Printf("Read: timeout waiting for read\n")
+		panic("fail")
+	case r, ok := <-self.enqueuedReads:
+		if !ok {
+			return 0, io.EOF
+		}
+		result = r
+		// something ready to read
+	}
+	//fmt.Printf("READ %v\n", result)
+
+	if self.position >= len(self.replay) {
+		fmt.Printf("Read: expected no more interactions, got: %#v\n", string(b))
+		panic("fail")
+	}
+
+	expected := self.replay[self.position]
+	if result != expected {
+		fmt.Printf("Read: expected read and read mismatch: %v, %v\n", expected, result)
+		panic("fail")
+	}
+
+	readData := []byte(expected[2:])
+	self.position = self.position + 1
+
+	copy(b, readData)
+	return len(readData), nil
 }
 
 func (self *MockSerialPort) Write(b []byte) (int, error) {
-	if len(self.replay) == 0 {
-		fmt.Printf("Expected: no more interactions, got: %#v", string(b))
+	//fmt.Printf("WRITE %v\n", string(b))
+	if self.position >= len(self.replay) {
+		fmt.Printf("Write: expected no more interactions, got: %#v\n", string(b))
 		panic("fail")
 	}
-	i := self.replay[0]
-	if strings.Index(i, "->") != 0 {
-		fmt.Printf("Replay isn't data to send: %v", i)
+
+	expected := self.replay[self.position]
+	if isRead(expected) {
+		fmt.Printf("Write: expected read %v, got write	: %#v\n", expected, string(b))
 		panic("fail")
 	}
-	expected := i[2:]
-	if expected != string(b) {
-		fmt.Printf("Expected: %#v got: %#v", expected, string(b))
+
+	if expected[2:] != string(b) {
+		fmt.Printf("Write: expected %#v got: %#v\n", expected, string(b))
 		panic("fail")
 	}
-	self.replay = self.replay[1:]
-	self.enqueueReads()
+	self.position = self.position + 1
+	self.EnqueueReads()
+
 	return len(b), nil
 }
 
 func (self *MockSerialPort) Close() error {
+	close(self.enqueuedReads)
 	return nil
 }

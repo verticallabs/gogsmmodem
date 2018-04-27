@@ -17,19 +17,25 @@ import (
 const BODY_PROMPT = "> "
 
 type Modem struct {
-	OOB   chan Packet
-	Debug bool
-	port  io.ReadWriteCloser
-	rx    chan Packet
-	tx    chan string
+	OOB          chan Packet
+	Debug        bool
+	port         io.ReadWriteCloser
+	rx           chan Packet
+	tx           chan string
+	ready        chan bool
+	initComplete bool
 }
 
-var OpenPort = func(config *serial.Config) (io.ReadWriteCloser, error) {
-	return serial.OpenPort(config)
+type PortOpener func(config *serial.Config) (io.ReadWriteCloser, error)
+
+func OpenSerial(config *serial.Config, debug bool) (*Modem, error) {
+	return Open(config, debug, func(config *serial.Config) (io.ReadWriteCloser, error) {
+		return serial.OpenPort(config)
+	})
 }
 
-func Open(config *serial.Config, debug bool) (*Modem, error) {
-	port, err := OpenPort(config)
+func Open(config *serial.Config, debug bool, po PortOpener) (*Modem, error) {
+	port, err := po(config)
 	if debug {
 		port = LogReadWriteCloser{port}
 	}
@@ -39,12 +45,14 @@ func Open(config *serial.Config, debug bool) (*Modem, error) {
 	oob := make(chan Packet, 16)
 	rx := make(chan Packet)
 	tx := make(chan string)
+	ready := make(chan bool)
 	modem := &Modem{
 		OOB:   oob,
 		Debug: debug,
 		port:  port,
 		rx:    rx,
 		tx:    tx,
+		ready: ready,
 	}
 	// run send/receive goroutine
 	go modem.listen()
@@ -59,7 +67,8 @@ func Open(config *serial.Config, debug bool) (*Modem, error) {
 func (self *Modem) Close() error {
 	close(self.OOB)
 	close(self.rx)
-	// close(self.tx)
+	close(self.tx)
+	close(self.ready)
 	return self.port.Close()
 }
 
@@ -67,7 +76,7 @@ func (self *Modem) Close() error {
 
 // GetMessage by index n from memory.
 func (self *Modem) GetMessage(n int) (*Message, error) {
-	packet, err := self.send("+CMGR", n)
+	packet, err := self.send(formatCommand("+CMGR", n))
 	if err != nil {
 		return nil, err
 	}
@@ -79,7 +88,7 @@ func (self *Modem) GetMessage(n int) (*Message, error) {
 
 // ListMessages stored in memory. Filter should be "ALL", "REC UNREAD", "REC READ", etc.
 func (self *Modem) ListMessages(filter string) (*MessageList, error) {
-	packet, err := self.send("+CMGL", filter)
+	packet, err := self.send(formatCommand("+CMGL", filter))
 	if err != nil {
 		return nil, err
 	}
@@ -105,7 +114,7 @@ func (self *Modem) ListMessages(filter string) (*MessageList, error) {
 }
 
 func (self *Modem) SupportedStorageAreas() (*StorageAreas, error) {
-	packet, err := self.send("+CPMS", "?")
+	packet, err := self.send(formatCommand("+CPMS", "?"))
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +125,7 @@ func (self *Modem) SupportedStorageAreas() (*StorageAreas, error) {
 }
 
 func (self *Modem) DeleteMessage(n int) error {
-	_, err := self.send("+CMGD", n)
+	_, err := self.send(formatCommand("+CMGD", n))
 	return err
 }
 
@@ -134,7 +143,14 @@ func lineChannel(r io.Reader) chan string {
 			all := []byte{}
 			line := ""
 			for {
-				b, _ := buffer.ReadByte()
+				b, e := buffer.ReadByte()
+				if e == io.EOF {
+					return
+				}
+				if e != nil {
+					panic(e.Error())
+				}
+
 				all = append(all, b)
 				line = string(all)
 				if b == 10 || line == BODY_PROMPT {
@@ -240,7 +256,7 @@ func (self *Modem) listen() {
 	for {
 		select {
 		case line := <-in:
-			fmt.Println(line)
+			//fmt.Printf("listen %v\n", line)
 			if line == echo {
 				continue // ignore echo of command
 			} else if last != "" && startsWith(line, last) {
@@ -264,18 +280,28 @@ func (self *Modem) listen() {
 				self.rx <- BodyPrompt{}
 			} else {
 				// OOB packet
+				//fmt.Println("OOB")
 				p := parsePacket("OK", line, "")
 				if p != nil {
 					self.OOB <- p
 				}
 			}
-		case line := <-self.tx:
+		case line, more := <-self.tx:
+			if !more {
+				return
+			}
+			//fmt.Printf("listen tx: %v\n", line)
 			m := reQuestion.FindStringSubmatch(line)
 			if len(m) > 0 {
 				last = m[1]
 			}
 			echo = strings.TrimRight(line, "\r\n")
 			self.port.Write([]byte(line))
+
+		case <-time.After(500 * time.Millisecond):
+			if !self.initComplete {
+				self.ready <- true
+			}
 		}
 	}
 }
@@ -290,49 +316,64 @@ func formatCommand(cmd string, args ...interface{}) string {
 }
 
 func (self *Modem) sendBody(cmd string, body string, args ...interface{}) (Packet, error) {
-	self.tx <- formatCommand(cmd, args...)
-	commandResponse := <-self.rx
+	commandResponse, commandErr := self.send(formatCommand(cmd, args...))
+	if commandErr != nil {
+		return nil, commandErr
+	}
+
 	_, isBodyPrompt := commandResponse.(BodyPrompt)
 	if !isBodyPrompt {
 		return commandResponse, errors.New(fmt.Sprintf("Expected body prompt, got %v", reflect.TypeOf(commandResponse)))
 	}
 
-	self.tx <- body + "\x1a"
-	bodyResponse := <-self.rx
-	if _, e := bodyResponse.(ERROR); e {
-		return bodyResponse, errors.New("Response was ERROR")
-	}
-	return bodyResponse, nil
+	return self.send(body + "\x1a")
 }
 
-func (self *Modem) send(cmd string, args ...interface{}) (Packet, error) {
-	self.tx <- formatCommand(cmd, args...)
-	response := <-self.rx
-	if _, e := response.(ERROR); e {
-		return response, errors.New("Response was ERROR")
+func (self *Modem) send(cmd string) (Packet, error) {
+	self.tx <- cmd
+
+	select {
+	case response := <-self.rx:
+		if _, e := response.(ERROR); e {
+			return response, errors.New("Response was ERROR")
+		}
+		return response, nil
+	case <-time.After(500 * time.Millisecond):
+		return nil, fmt.Errorf("Timed out waiting for response to %v", cmd)
 	}
-	return response, nil
 }
 
 func (self *Modem) init() error {
-	self.tx <- "\x1b" 
+	// wait for any outstanding reads to take place
 	select {
-	case _ = <-self.rx:
-	case <-time.After(1 * time.Second):
+	case r := <-self.ready:
+		self.initComplete = true
+		if !r {
+			return fmt.Errorf("Not ready")
+		}
 	}
 
-	// clear settings
-	if _, err := self.send("Z"); err != nil {
-		return err
+	// reset
+	for i := 0; ; i++ {
+		_, err := self.send(formatCommand("Z"))
+		if err == nil {
+			break
+		} else if i > 3 {
+			return fmt.Errorf("Could not reset modem")
+		}
+		// send an escape character in case of hanging body
+		log.Println("No answer to ATZ, sending escape")
+		self.send("\x1b")
 	}
 	log.Println("Reset")
+
 	// turn off echo
-	if _, err := self.send("E0"); err != nil {
+	if _, err := self.send(formatCommand("E0")); err != nil {
 		return err
 	}
 	log.Println("Echo off")
 	// use combined storage (MT)
-	msg, err := self.send("+CPMS", "SM", "SM", "SM")
+	msg, err := self.send(formatCommand("+CPMS", "SM", "SM", "SM"))
 	if err != nil {
 		return err
 	}
@@ -340,19 +381,19 @@ func (self *Modem) init() error {
 	log.Printf("Set SMS Storage: %d/%d used\n", sinfo.UsedSpace1, sinfo.MaxSpace1)
 	// set SMS text mode - easiest to implement. Ignore response which is
 	// often a benign error.
-	self.send("+CMGF", 1)
+	self.send(formatCommand("+CMGF", 1))
 
 	log.Println("Set SMS text mode")
 	// get SMSC
 	// the modem complains if SMSC hasn't been set, but stores it correctly, so
 	// query for stored value, then send a set from the query response.
-	r, err := self.send("+CSCA?")
+	r, err := self.send(formatCommand("+CSCA?"))
 	if err != nil {
 		return err
 	}
 	smsc := r.(SMSCAddress)
 	log.Println("Got SMSC:", smsc.Args)
-	r, err = self.send("+CSCA", smsc.Args...)
+	r, err = self.send(formatCommand("+CSCA", smsc.Args...))
 	if err != nil {
 		return err
 	}

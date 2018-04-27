@@ -5,7 +5,8 @@
 Go library for the sending and receiving SMS messages through a GSM modem.
 
 ### Tested devices
-- ZTE MF110/MF627/MF636
+- SIM800L
+- previously tested ZTE MF110/MF627/MF636
 
 ### Installation
 Run:
@@ -28,7 +29,7 @@ import (
 
 func main() {
     conf := serial.Config{Name: "/dev/ttyUSB1", Baud: 115200}
-    modem, err := gogsmmodem.Open(&conf, true)
+    modem, err := gogsmmodem.OpenSerial(&conf, true)
     if err != nil {
         panic(err)
     }

@@ -11,7 +11,7 @@ import (
 
 func main() {
 	conf := serial.Config{Name: "/dev/ttyUSB1", Baud: 115200}
-	modem, err := gogsmmodem.Open(&conf, true)
+	modem, err := gogsmmodem.OpenSerial(&conf, true)
 	if err != nil {
 		panic(err)
 	}

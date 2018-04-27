@@ -42,6 +42,7 @@ func Open(config *serial.Config, debug bool, po PortOpener) (*Modem, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	oob := make(chan Packet, 16)
 	rx := make(chan Packet)
 	tx := make(chan string)
@@ -54,6 +55,7 @@ func Open(config *serial.Config, debug bool, po PortOpener) (*Modem, error) {
 		tx:    tx,
 		ready: ready,
 	}
+
 	// run send/receive goroutine
 	go modem.listen()
 
@@ -256,7 +258,6 @@ func (self *Modem) listen() {
 	for {
 		select {
 		case line := <-in:
-			//fmt.Printf("listen %v\n", line)
 			if line == echo {
 				continue // ignore echo of command
 			} else if last != "" && startsWith(line, last) {
@@ -280,7 +281,6 @@ func (self *Modem) listen() {
 				self.rx <- BodyPrompt{}
 			} else {
 				// OOB packet
-				//fmt.Println("OOB")
 				p := parsePacket("OK", line, "")
 				if p != nil {
 					self.OOB <- p
@@ -290,7 +290,6 @@ func (self *Modem) listen() {
 			if !more {
 				return
 			}
-			//fmt.Printf("listen tx: %v\n", line)
 			m := reQuestion.FindStringSubmatch(line)
 			if len(m) > 0 {
 				last = m[1]
@@ -356,7 +355,8 @@ func (self *Modem) init() error {
 	// reset
 	for i := 0; ; i++ {
 		_, err := self.send(formatCommand("Z"))
-		if err == nil {
+		if err == nil { // successfully reset modem
+			log.Println("Reset")
 			break
 		} else if i > 3 {
 			return fmt.Errorf("Could not reset modem")
@@ -365,13 +365,13 @@ func (self *Modem) init() error {
 		log.Println("No answer to ATZ, sending escape")
 		self.send("\x1b")
 	}
-	log.Println("Reset")
 
 	// turn off echo
 	if _, err := self.send(formatCommand("E0")); err != nil {
 		return err
 	}
 	log.Println("Echo off")
+
 	// use combined storage (MT)
 	msg, err := self.send(formatCommand("+CPMS", "SM", "SM", "SM"))
 	if err != nil {
@@ -379,6 +379,7 @@ func (self *Modem) init() error {
 	}
 	sinfo := msg.(StorageInfo)
 	log.Printf("Set SMS Storage: %d/%d used\n", sinfo.UsedSpace1, sinfo.MaxSpace1)
+
 	// set SMS text mode - easiest to implement. Ignore response which is
 	// often a benign error.
 	self.send(formatCommand("+CMGF", 1))

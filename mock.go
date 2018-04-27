@@ -7,6 +7,14 @@ import (
 	"time"
 )
 
+func isRead(str string) bool {
+	return strings.Index(str, "<-") == 0
+}
+
+func isWrite(str string) bool {
+	return strings.Index(str, "->") == 0
+}
+
 type MockSerialPort struct {
 	replay        []string
 	enqueuedReads chan string
@@ -25,14 +33,6 @@ func NewMockSerialPort(replay []string) *MockSerialPort {
 
 func (self *MockSerialPort) Done() bool {
 	return self.position >= len(self.replay)
-}
-
-func isRead(str string) bool {
-	return strings.Index(str, "<-") == 0
-}
-
-func isWrite(str string) bool {
-	return strings.Index(str, "->") == 0
 }
 
 func (self *MockSerialPort) Print() {
